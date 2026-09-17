@@ -1,0 +1,9 @@
+.venv/
+third_party/
+outputs/
+models/
+data/
+__pycache__/
+*.pyc
+*.local.json
+*.local.env

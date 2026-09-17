@@ -1,0 +1,7 @@
+{
+  "model_path": "/mnt/workspace/models/inclusionAI/LLaDA2.1-mini",
+  "torch_pip_args": [],
+  "build_env": {},
+  "server_env": {},
+  "extra_server_args": []
+}
