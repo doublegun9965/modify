@@ -80,6 +80,19 @@ runtime variables in `server_env`. No old RMSNorm workaround is enabled by defau
 
 ## 3. Install on the AMD server
 
+If Cargo downloads take time, prefetch with visible progress before the full
+installation. The command exits successfully only after Cargo has resolved the
+Rust dependencies; returning to a prompt after `timeout` does not prove success.
+The command leaves successfully downloaded crates in the Cargo cache.
+
+```bash
+/usr/bin/python3 scripts/setup_server.py --prefetch-rust-only
+```
+
+The full setup also performs this visible Cargo check before pip's editable
+build. If a previous installation is still running, stop it before prefetching
+so the two Cargo processes do not contend for the same cache or lock.
+
 Prerequisites: Git, a compatible Python with venv, ROCm development toolkit
 including `hipcc`, C/C++ build tools, and Rust/Cargo. The pinned SGLang source
 build includes a Rust extension. On the probed machine, install Rust using the

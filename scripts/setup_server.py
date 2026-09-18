@@ -18,8 +18,11 @@ def run(args, **kwargs):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--prepare-only", action="store_true",
-                        help="Create venv and fetch source, without installing packages")
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument("--prepare-only", action="store_true",
+                       help="Create venv and fetch source, without installing packages")
+    modes.add_argument("--prefetch-rust-only", action="store_true",
+                       help="Show Cargo dependency download progress, then stop before installation")
     args = parser.parse_args()
     if platform.system() != "Linux":
         parser.error("Run on the Linux AMD server. No local venv is needed.")
@@ -29,7 +32,7 @@ def main():
     reuse_system_torch = cfg.get("reuse_system_torch", False)
     if not isinstance(reuse_system_torch, bool):
         parser.error("reuse_system_torch must be true or false")
-    if not args.prepare_only and not (cfg["torch_pip_args"] or reuse_system_torch):
+    if not (args.prepare_only or args.prefetch_rust_only) and not (cfg["torch_pip_args"] or reuse_system_torch):
         parser.error("Set torch_pip_args or reuse_system_torch in config/runtime.local.json; see README")
     if reuse_system_torch and cfg["torch_pip_args"]:
         parser.error("Choose either reuse_system_torch or torch_pip_args, not both")
@@ -68,6 +71,13 @@ def main():
     if not os.path.isfile(cargo):
         parser.error("Rust cargo is required to build SGLang Rust extensions; install Rust first")
     env["PATH"] = os.path.dirname(cargo) + os.pathsep + env["PATH"]
+    print("Resolving and downloading Rust dependencies with visible Cargo progress...", flush=True)
+    run([cargo, "metadata", "--manifest-path", "../rust/sglang-mm/Cargo.toml",
+         "--format-version", "1"], cwd=SOURCE / "python", env=env,
+        stdout=subprocess.DEVNULL)
+    if args.prefetch_rust_only:
+        print("Rust dependencies resolved successfully. You can now run full setup.")
+        return
     output = run_dir("setup")
     (output / "config.json").write_text(json.dumps(cfg, indent=2), encoding="utf-8")
     pip = [PYTHON, "-m", "pip"]
