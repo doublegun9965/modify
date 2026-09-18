@@ -80,6 +80,14 @@ runtime variables in `server_env`. No old RMSNorm workaround is enabled by defau
 
 ## 3. Install on the AMD server
 
+Cargo crate downloads use the project-local `.cargo/config.toml` with the USTC
+sparse mirror. Cargo commands under this checkout, including the nested SGLang
+source build, inherit it. The mirror does not alter other projects or the
+system-wide Cargo configuration. If the mirror is unavailable from a server,
+check `https://mirrors.ustc.edu.cn/crates.io-index/config.json` there before
+trying another source. Switching registries may redownload crates already cached
+from crates.io.
+
 If Cargo downloads take time, prefetch with visible progress before the full
 installation. The command exits successfully only after Cargo has resolved the
 Rust dependencies; returning to a prompt after `timeout` does not prove success.
