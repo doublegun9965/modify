@@ -6,5 +6,8 @@
     "AMDGPU_TARGET": "gfx942"
   },
   "model_path": "inclusionAI/LLaDA2.1-mini",
+  "server_env": {
+    "SGLANG_DISABLE_VLLM_RMSNORM": "1"
+  },
   "extra_server_args": []
 }

@@ -3,6 +3,8 @@
   "torch_pip_args": [],
   "reuse_system_torch": false,
   "build_env": {},
-  "server_env": {},
+  "server_env": {
+    "SGLANG_DISABLE_VLLM_RMSNORM": "1"
+  },
   "extra_server_args": []
 }

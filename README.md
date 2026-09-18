@@ -76,7 +76,10 @@ wheels can also be supplied. Do not use default PyPI CUDA torch packages.
 
 The local JSON overrides top-level keys in `config/runtime.json`. Set optional
 build variables (for example the confirmed GPU architecture) in `build_env` and
-runtime variables in `server_env`. No old RMSNorm workaround is enabled by default.
+runtime variables in `server_env`. The MI308X example sets
+`SGLANG_DISABLE_VLLM_RMSNORM=1`: it avoids the incompatible vLLM RMSNorm path
+on this server's ROCm stack. `launch_server.py` loads it automatically for each
+server start.
 
 ## 3. Install on the AMD server
 
