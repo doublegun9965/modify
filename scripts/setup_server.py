@@ -80,6 +80,10 @@ def main():
     # Prevent dependency resolution from replacing the installed ROCm torch.
     torch_version = subprocess.check_output([PYTHON, "-c", "import torch; print(torch.__version__)"],
                                             text=True, env=env).strip()
+    if reuse_system_torch and torch_version.startswith("2.12.") and not cfg.get("compressed_tensors_version"):
+        cfg["compressed_tensors_version"] = "0.16.0"
+        print("Using compressed-tensors 0.16.0 for system torch 2.12", flush=True)
+        (output / "config.json").write_text(json.dumps(cfg, indent=2), encoding="utf-8")
     if reuse_system_torch:
         run([PYTHON, "-c", "import torch, sys; "
              "print('Reusing system ROCm torch:', torch.__file__); "
@@ -89,6 +93,12 @@ def main():
     constraints.write_text(f"torch=={torch_version}\n", encoding="utf-8")
     env["PIP_CONSTRAINT"] = str(constraints)
     # Select upstream's AMD packaging metadata, preserving the original files.
+    # The upstream 0.15.0 pin targets older ROCm torch (<2.11). The MI308X
+    # image instead ships torch 2.12, for which compressed-tensors 0.16.0
+    # declares a compatible lower bound (torch>=2.10).
+    compressed_version = cfg.get("compressed_tensors_version")
+    if compressed_version and not reuse_system_torch:
+        parser.error("compressed_tensors_version is only for a vetted system torch")
     replacements = [
         (SOURCE / "python/pyproject.toml", SOURCE / "python/pyproject_other.toml"),
         (SOURCE / "python/sglang/kernels/aot/pyproject.toml",
@@ -97,12 +107,21 @@ def main():
     for target, template in replacements:
         if not template.exists():
             raise RuntimeError(f"Missing upstream AMD packaging file: {template}")
-        if target.exists() and target.read_bytes() != template.read_bytes():
+        original = template.read_bytes()
+        desired = original
+        if target == SOURCE / "python/pyproject.toml" and compressed_version:
+            old_pin = b'"compressed-tensors==0.15.0"'
+            if original.count(old_pin) != 1:
+                raise RuntimeError("Expected upstream compressed-tensors pin changed; inspect source")
+            if compressed_version != "0.16.0":
+                parser.error("Only compressed-tensors 0.16.0 has been reviewed for this server")
+            desired = original.replace(old_pin, b'"compressed-tensors==0.16.0"')
+        if target.exists() and target.read_bytes() not in (original, desired):
             backup = target.with_name(target.name + ".pre-amd")
             if backup.exists():
                 raise RuntimeError(f"Metadata differs after earlier setup; inspect {target} before retrying")
             shutil.copy2(target, backup)
-        shutil.copy2(template, target)
+        target.write_bytes(desired)
     run([PYTHON, "setup_rocm.py", "install"],
         cwd=SOURCE / "python/sglang/kernels/aot", env=env)
     # Text serving needs srt_hip, not the image/video diffusion extras in all_hip.

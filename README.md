@@ -47,6 +47,14 @@ cp config/runtime.mi308x.example.json config/runtime.local.json
 
 The example sets `reuse_system_torch: true` and keeps `torch_pip_args` empty.
 The venv inherits system packages only when created.
+It also selects `compressed-tensors==0.16.0` for this server's PyTorch 2.12.
+An existing local config copied before this change gets the same selection
+automatically when setup detects system PyTorch 2.12; no file reset is needed.
+Upstream SGLang v0.5.18 pins 0.15.0 for its older ROCm PyTorch 2.9.1 base,
+but that package requires torch<2.11 and cannot resolve here. The setup script
+changes only this dependency pin in the ignored SGLang checkout; it records the
+effective config under `outputs/setup/`. This pairing still needs a server smoke
+test to confirm runtime API compatibility.
 If you copied the earlier MI308X example containing
 `"SGLANG_BUILD_RUST_EXTS": "none"`, remove that key from `build_env` before
 full installation. Keep any custom model path or other local settings.

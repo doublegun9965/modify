@@ -1,6 +1,7 @@
 {
   "reuse_system_torch": true,
   "torch_pip_args": [],
+  "compressed_tensors_version": "0.16.0",
   "build_env": {
     "AMDGPU_TARGET": "gfx942"
   },
