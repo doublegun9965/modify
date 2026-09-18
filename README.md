@@ -8,7 +8,11 @@ correction quality or in-place editing support.
 ## Isolation and version
 
 - Local development does not require a venv or GPU packages.
-- The Linux server creates `.venv/` without shared system packages.
+- The Linux server creates `.venv/`. By default it does not inherit system
+  packages. On the identified MI308X server, `reuse_system_torch: true` can
+  expose its working ROCm PyTorch installation while keeping the project SGLang
+  source and new Python packages in the venv. This intentionally shares the
+  system PyTorch and its dependencies; SGLang is still installed separately.
 - SGLang source lives in `third_party/sglang/`, an ignored, independent checkout.
 - Initial version: `v0.5.18`, commit `71de97b264b04dcd514cf904003028aefe9775c8`.
 - No previous experimental patches are applied. AMD packaging files supplied by
@@ -25,27 +29,33 @@ cd modify
 python3 scripts/probe_server.py
 ```
 
-Share the generated `outputs/probe/run_*/server.json` to select the correct ROCm
-PyTorch packages. GPU model, ROCm development toolkit, Python ABI and wheel
-availability must match. The installer deliberately has no guessed wheel URL.
-An existing working environment's PyTorch is not inherited by the new venv.
+The identified server has an MI308X (gfx942), ROCm 7.2.3, Python 3.12 and a
+working system PyTorch `2.12.0+git6bbd260` with HIP 7.2.53211. It does not
+have Cargo. The following steps use that existing PyTorch. If moving to a
+different server, probe it again and select matching ROCm packages there.
 
 ## 2. Prepare project source and venv
 
-Choose the server Python interpreter compatible with the selected ROCm wheels
-(Python 3.10+; using a supported Python 3.12 installation is a reasonable starting
-point, but wheel availability must be checked).
+On the identified MI308X server, use the probed `/usr/bin/python3`, which
+already sees its ROCm PyTorch installation. Copy the matching example first:
 
 ```bash
-python3 scripts/setup_server.py --prepare-only
-cp config/runtime.local.example.json config/runtime.local.json
+cp config/runtime.mi308x.example.json config/runtime.local.json
+/usr/bin/python3 scripts/setup_server.py --prepare-only
 ```
+
+The example sets `reuse_system_torch: true` and keeps `torch_pip_args` empty.
+The venv inherits system packages only when created.
+If `.venv` already exists, the installer checks its setting and stops on a
+mismatch rather than silently changing it. No project environment was present
+when the initial probe was run.
 
 If `venv`/`ensurepip` is missing, install the OS's matching Python venv package.
 The setup script never changes system drivers or installs system packages.
 
-Edit the ignored `config/runtime.local.json` with your model path and
-`torch_pip_args`. This list is passed as individual arguments to `pip install`.
+For another server without suitable system PyTorch, set `torch_pip_args` in
+the ignored `config/runtime.local.json`. This list is passed as individual
+arguments to `pip install`.
 For example, the shape is
 `["torch==VERSION", "--index-url", "https://download.pytorch.org/whl/ROCM_CHANNEL"]`.
 `VERSION` and `ROCM_CHANNEL` are placeholders, not usable settings. Use the exact
@@ -59,14 +69,16 @@ runtime variables in `server_env`. No old RMSNorm workaround is enabled by defau
 ## 3. Install on the AMD server
 
 Prerequisites: Git, a compatible Python with venv, ROCm development toolkit
-including `hipcc`, C/C++ build tools, and Rust/Cargo on PATH. The latest source
+including `hipcc`, C/C++ build tools, and Rust/Cargo on PATH. The probed server
+has everything detected except Cargo. Install it in the user environment before
+running the full setup, and check `~/.cargo/bin/cargo --version`. The latest source
 build has more dependencies than an ordinary pure-Python package.
 
 ```bash
-python3 scripts/setup_server.py
+/usr/bin/python3 scripts/setup_server.py
 ```
 
-This installs ROCm PyTorch first, verifies GPU access, constrains that torch
+This uses the selected ROCm PyTorch, verifies GPU access, constrains that torch
 version during dependency resolution, builds upstream ROCm kernels and installs
 the text-serving `srt_hip` extra in editable mode. It then runs dependency and
 runtime checks and records the package versions under `outputs/setup/`.

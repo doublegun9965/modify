@@ -21,6 +21,7 @@ def check():
     if not torch.cuda.is_available():
         raise RuntimeError("ROCm PyTorch cannot access a GPU. Check driver/device access.")
     result = {"python": sys.executable, "sglang": str(actual),
+              "torch_path": str(Path(torch.__file__).resolve()),
               "torch": torch.__version__, "hip": torch.version.hip,
               "gpus": [torch.cuda.get_device_name(i)
                        for i in range(torch.cuda.device_count())]}

@@ -26,19 +26,29 @@ def main():
     if sys.version_info < (3, 10):
         parser.error("Python 3.10 or newer is required")
     cfg = config()
-    if not args.prepare_only and not cfg["torch_pip_args"]:
-        parser.error("Set torch_pip_args in config/runtime.local.json after checking GPU/ROCm; see README")
+    reuse_system_torch = cfg.get("reuse_system_torch", False)
+    if not isinstance(reuse_system_torch, bool):
+        parser.error("reuse_system_torch must be true or false")
+    if not args.prepare_only and not (cfg["torch_pip_args"] or reuse_system_torch):
+        parser.error("Set torch_pip_args or reuse_system_torch in config/runtime.local.json; see README")
+    if reuse_system_torch and cfg["torch_pip_args"]:
+        parser.error("Choose either reuse_system_torch or torch_pip_args, not both")
     if SOURCE.is_symlink() or VENV.is_symlink():
         parser.error("Source and venv must be project-local directories, not symlinks")
     if not VENV.exists():
-        venv.EnvBuilder(with_pip=True, system_site_packages=False).create(VENV)
+        venv.EnvBuilder(with_pip=True, system_site_packages=reuse_system_torch).create(VENV)
     if not PYTHON.exists():
         parser.error("Existing .venv is not a Linux venv; it was left untouched")
     env = isolated_env(cfg["build_env"])
     run([PYTHON, "-c", "import sys; from pathlib import Path; "
          f"assert Path(sys.prefix).resolve() == Path({str(VENV)!r}).resolve(); "
-         "assert 'include-system-site-packages = false' in "
+         f"assert 'include-system-site-packages = {str(reuse_system_torch).lower()}' in "
          "(Path(sys.prefix) / 'pyvenv.cfg').read_text().lower()"], env=env)
+    if reuse_system_torch:
+        run([PYTHON, "-c", "import torch; "
+             "assert torch.version.hip, 'System torch is not ROCm'; "
+             "assert torch.cuda.is_available(), 'System ROCm GPU not accessible'; "
+             "print('System ROCm torch:', torch.__version__, torch.__file__)"], env=env)
     if not SOURCE.exists():
         SOURCE.parent.mkdir(parents=True, exist_ok=True)
         run(["git", "clone", "--depth", "1", "--branch", cfg["sglang_tag"],
@@ -51,19 +61,27 @@ def main():
         return
     if not shutil.which("hipcc") and not (os.path.exists("/opt/rocm/bin/hipcc")):
         parser.error("ROCm development tools (hipcc) are required to build kernels")
-    if not shutil.which("cargo"):
+    cargo = shutil.which("cargo") or str(os.path.expanduser("~/.cargo/bin/cargo"))
+    if not os.path.isfile(cargo):
         parser.error("Rust cargo is required by this SGLang version; install the server toolchain first")
+    env["PATH"] = os.path.dirname(cargo) + os.pathsep + env["PATH"]
     output = run_dir("setup")
     (output / "config.json").write_text(json.dumps(cfg, indent=2), encoding="utf-8")
     pip = [PYTHON, "-m", "pip"]
     run([*pip, "install", "--upgrade", "pip", "setuptools", "wheel", "ninja", "packaging", "pybind11"], env=env)
-    run([*pip, "install", *cfg["torch_pip_args"]], env=env)
+    if cfg["torch_pip_args"]:
+        run([*pip, "install", *cfg["torch_pip_args"]], env=env)
     run([PYTHON, "-c", "import torch; assert torch.version.hip, 'Not ROCm torch'; "
          "assert torch.cuda.is_available(), 'No accessible AMD GPU'; "
          "print(torch.__version__, torch.version.hip)"], env=env)
     # Prevent dependency resolution from replacing the installed ROCm torch.
     torch_version = subprocess.check_output([PYTHON, "-c", "import torch; print(torch.__version__)"],
                                             text=True, env=env).strip()
+    if reuse_system_torch:
+        run([PYTHON, "-c", "import torch, sys; "
+             "print('Reusing system ROCm torch:', torch.__file__); "
+             "assert not torch.__file__.startswith(sys.prefix + '/'), "
+             "'Expected system torch but found a venv copy'"], env=env)
     constraints = output / "constraints.txt"
     constraints.write_text(f"torch=={torch_version}\n", encoding="utf-8")
     env["PIP_CONSTRAINT"] = str(constraints)
@@ -86,6 +104,9 @@ def main():
         cwd=SOURCE / "python/sglang/kernels/aot", env=env)
     # Text serving needs srt_hip, not the image/video diffusion extras in all_hip.
     run([*pip, "install", "-e", str(SOURCE / "python") + "[srt_hip]"], env=env)
+    run([PYTHON, "-c", "import torch; "
+         f"assert torch.__version__ == {torch_version!r}, "
+         "'SGLang install replaced ROCm torch'"], env=env)
     run([*pip, "check"], env=env)
     run([PYTHON, ROOT / "scripts/check_runtime.py"], env=env)
     with (output / "requirements.freeze.txt").open("w", encoding="utf-8") as stream:
