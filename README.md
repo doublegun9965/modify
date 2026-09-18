@@ -78,8 +78,17 @@ The local JSON overrides top-level keys in `config/runtime.json`. Set optional
 build variables (for example the confirmed GPU architecture) in `build_env` and
 runtime variables in `server_env`. The MI308X example sets
 `SGLANG_DISABLE_VLLM_RMSNORM=1`: it avoids the incompatible vLLM RMSNorm path
-on this server's ROCm stack. `launch_server.py` loads it automatically for each
-server start.
+on this server's ROCm stack. Apply the matching project SGLang patch once after
+the source checkout exists:
+
+```bash
+/usr/bin/python3 scripts/apply_sglang_patch.py
+```
+
+`launch_server.py` then loads the variable automatically for each server start.
+The patch is idempotent: running the command again reports that it is already
+applied. It changes only `third_party/sglang/`, which is this project's ignored,
+dedicated source checkout.
 
 ## 3. Install on the AMD server
 
