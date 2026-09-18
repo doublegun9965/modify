@@ -87,14 +87,6 @@ build includes a Rust extension. On the probed machine, install Rust using the
 `~/.cargo/bin/cargo --version`. The source build has more dependencies than an
 ordinary pure-Python package.
 
-This repository's `.cargo/config.toml` directs Cargo crate downloads to the
-[USTC sparse mirror](https://mirrors.ustc.edu.cn/help/crates.io-index.html).
-Cargo reads it when invoked from this project, including SGLang's nested source
-directory; other projects' Cargo configuration is unchanged. To compare mirror
-reachability before a long paid-server build, run
-`curl -IL --max-time 15 https://mirrors.ustc.edu.cn/crates.io-index/config.json`.
-If this mirror is slower or unavailable from a particular server, remove or
-override this project-level Cargo config there before retrying.
 
 ```bash
 /usr/bin/python3 scripts/setup_server.py

@@ -1,7 +1,0 @@
-# Project-scoped Cargo mirror for SGLang's Rust source build.
-# Cargo reads this file from the working directory and its parents.
-[source.crates-io]
-replace-with = "ustc"
-
-[source.ustc]
-registry = "sparse+https://mirrors.ustc.edu.cn/crates.io-index/"
