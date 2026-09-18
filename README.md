@@ -117,6 +117,20 @@ This uses the selected ROCm PyTorch, verifies GPU access, constrains that torch
 version during dependency resolution, builds upstream ROCm kernels and installs
 the text-serving `srt_hip` extra in editable mode. It then runs dependency and
 runtime checks and records the package versions under `outputs/setup/`.
+When borrowing system ROCm PyTorch, dependency checks cover packages installed
+in the project venv. Global packages such as the server image's vLLM may
+require conflicting versions, so a whole-environment `pip check` can report
+unrelated conflicts. If SGLang already finished installing and the old setup
+script stopped at `pip check`, pull the updated code and verify the existing
+installation without rebuilding:
+
+```bash
+cd /mnt/workspace/modify
+git pull
+/usr/bin/python3 scripts/setup_server.py --verify-only
+```
+
+Only proceed to launch if this verification passes.
 The larger `all_hip` extra also installs image/video diffusion components, which
 this text-serving experiment does not need.
 

@@ -23,6 +23,8 @@ def main():
                        help="Create venv and fetch source, without installing packages")
     modes.add_argument("--prefetch-rust-only", action="store_true",
                        help="Show Cargo dependency download progress, then stop before installation")
+    modes.add_argument("--verify-only", action="store_true",
+                       help="Check existing installation without downloading or rebuilding")
     args = parser.parse_args()
     if platform.system() != "Linux":
         parser.error("Run on the Linux AMD server. No local venv is needed.")
@@ -32,12 +34,14 @@ def main():
     reuse_system_torch = cfg.get("reuse_system_torch", False)
     if not isinstance(reuse_system_torch, bool):
         parser.error("reuse_system_torch must be true or false")
-    if not (args.prepare_only or args.prefetch_rust_only) and not (cfg["torch_pip_args"] or reuse_system_torch):
+    if not (args.prepare_only or args.prefetch_rust_only or args.verify_only) and not (cfg["torch_pip_args"] or reuse_system_torch):
         parser.error("Set torch_pip_args or reuse_system_torch in config/runtime.local.json; see README")
     if reuse_system_torch and cfg["torch_pip_args"]:
         parser.error("Choose either reuse_system_torch or torch_pip_args, not both")
     if SOURCE.is_symlink() or VENV.is_symlink():
         parser.error("Source and venv must be project-local directories, not symlinks")
+    if args.verify_only and not VENV.exists():
+        parser.error("No existing project venv to verify")
     if not VENV.exists():
         venv.EnvBuilder(with_pip=True, system_site_packages=reuse_system_torch).create(VENV)
     if not PYTHON.exists():
@@ -61,6 +65,11 @@ def main():
         parser.error(f"Existing source commit {head} differs from configured pin; source left untouched")
     print(f"Source: {SOURCE}\nCommit: {head}\nVenv: {VENV}")
     if args.prepare_only:
+        return
+    if args.verify_only:
+        run([PYTHON, ROOT / "scripts/check_project_dependencies.py"], env=env)
+        run([PYTHON, ROOT / "scripts/check_runtime.py"], env=env)
+        print("Existing installation checks passed; no packages rebuilt.")
         return
     if not shutil.which("hipcc") and not (os.path.exists("/opt/rocm/bin/hipcc")):
         parser.error("ROCm development tools (hipcc) are required to build kernels")
@@ -139,7 +148,9 @@ def main():
     run([PYTHON, "-c", "import torch; "
          f"assert torch.__version__ == {torch_version!r}, "
          "'SGLang install replaced ROCm torch'"], env=env)
-    run([*pip, "check"], env=env)
+    # System packages are visible to borrow ROCm torch, but their dependencies
+    # (e.g. the image's unrelated vLLM) need not match this SGLang venv.
+    run([PYTHON, ROOT / "scripts/check_project_dependencies.py"], env=env)
     run([PYTHON, ROOT / "scripts/check_runtime.py"], env=env)
     with (output / "requirements.freeze.txt").open("w", encoding="utf-8") as stream:
         run([*pip, "freeze"], env=env, stdout=stream)
