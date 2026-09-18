@@ -31,9 +31,8 @@ python3 scripts/probe_server.py
 
 The identified server has an MI308X (gfx942), ROCm 7.2.3, Python 3.12 and a
 working system PyTorch `2.12.0+git6bbd260` with HIP 7.2.53211. It does not
-have Cargo. The text-only setup skips SGLang's Rust multimodal extension using
-upstream's `SGLANG_BUILD_RUST_EXTS=none` build option, so Cargo is not required
-for this first trial. If moving to a
+have Cargo. The source build uses Rust extensions, so install Rust/Cargo before
+the full setup. If moving to a
 different server, probe it again and select matching ROCm packages there.
 
 ## 2. Prepare project source and venv
@@ -48,6 +47,9 @@ cp config/runtime.mi308x.example.json config/runtime.local.json
 
 The example sets `reuse_system_torch: true` and keeps `torch_pip_args` empty.
 The venv inherits system packages only when created.
+If you copied the earlier MI308X example containing
+`"SGLANG_BUILD_RUST_EXTS": "none"`, remove that key from `build_env` before
+full installation. Keep any custom model path or other local settings.
 If `.venv` already exists, the installer checks its setting and stops on a
 mismatch rather than silently changing it. No project environment was present
 when the initial probe was run.
@@ -71,10 +73,11 @@ runtime variables in `server_env`. No old RMSNorm workaround is enabled by defau
 ## 3. Install on the AMD server
 
 Prerequisites: Git, a compatible Python with venv, ROCm development toolkit
-including `hipcc`, and C/C++ build tools. The MI308X example disables the Rust
-multimodal extension for this text-only trial. If Rust extensions are enabled
-later, install Rust/Cargo and check `~/.cargo/bin/cargo --version`. The latest
-source build has more dependencies than an ordinary pure-Python package.
+including `hipcc`, C/C++ build tools, and Rust/Cargo. The pinned SGLang source
+build includes a Rust extension. On the probed machine, install Rust using the
+[official rustup instructions](https://rust-lang.org/tools/install/), then check
+`~/.cargo/bin/cargo --version`. The source build has more dependencies than an
+ordinary pure-Python package.
 
 ```bash
 /usr/bin/python3 scripts/setup_server.py
@@ -92,8 +95,6 @@ combination. If installation or startup fails, preserve the terminal error and
 probe report. Some GPU/backend combinations may need additional AMD components
 such as AITER; select those after examining the actual server rather than applying
 old patches or replacing the shared environment.
-Skipping Rust extensions is supported by SGLang's build script; whether this
-particular text model starts without them must still be verified on the server.
 
 ## 4. Launch LLaDA2.1-mini
 

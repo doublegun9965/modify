@@ -2,8 +2,7 @@
   "reuse_system_torch": true,
   "torch_pip_args": [],
   "build_env": {
-    "AMDGPU_TARGET": "gfx942",
-    "SGLANG_BUILD_RUST_EXTS": "none"
+    "AMDGPU_TARGET": "gfx942"
   },
   "model_path": "inclusionAI/LLaDA2.1-mini",
   "extra_server_args": []

@@ -61,12 +61,13 @@ def main():
         return
     if not shutil.which("hipcc") and not (os.path.exists("/opt/rocm/bin/hipcc")):
         parser.error("ROCm development tools (hipcc) are required to build kernels")
-    if env.get("SGLANG_BUILD_RUST_EXTS", "").strip().lower() != "none":
-        cargo = shutil.which("cargo") or str(os.path.expanduser("~/.cargo/bin/cargo"))
-        if not os.path.isfile(cargo):
-            parser.error("Rust cargo is required to build SGLang Rust extensions; "
-                         "set build_env.SGLANG_BUILD_RUST_EXTS to 'none' for the text-only trial")
-        env["PATH"] = os.path.dirname(cargo) + os.pathsep + env["PATH"]
+    if env.get("SGLANG_BUILD_RUST_EXTS", "").strip().lower() == "none":
+        parser.error("This setup expects SGLang's Rust extensions; remove "
+                     "SGLANG_BUILD_RUST_EXTS=none from build_env")
+    cargo = shutil.which("cargo") or str(os.path.expanduser("~/.cargo/bin/cargo"))
+    if not os.path.isfile(cargo):
+        parser.error("Rust cargo is required to build SGLang Rust extensions; install Rust first")
+    env["PATH"] = os.path.dirname(cargo) + os.pathsep + env["PATH"]
     output = run_dir("setup")
     (output / "config.json").write_text(json.dumps(cfg, indent=2), encoding="utf-8")
     pip = [PYTHON, "-m", "pip"]
