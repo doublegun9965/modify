@@ -31,7 +31,9 @@ python3 scripts/probe_server.py
 
 The identified server has an MI308X (gfx942), ROCm 7.2.3, Python 3.12 and a
 working system PyTorch `2.12.0+git6bbd260` with HIP 7.2.53211. It does not
-have Cargo. The following steps use that existing PyTorch. If moving to a
+have Cargo. The text-only setup skips SGLang's Rust multimodal extension using
+upstream's `SGLANG_BUILD_RUST_EXTS=none` build option, so Cargo is not required
+for this first trial. If moving to a
 different server, probe it again and select matching ROCm packages there.
 
 ## 2. Prepare project source and venv
@@ -69,10 +71,10 @@ runtime variables in `server_env`. No old RMSNorm workaround is enabled by defau
 ## 3. Install on the AMD server
 
 Prerequisites: Git, a compatible Python with venv, ROCm development toolkit
-including `hipcc`, C/C++ build tools, and Rust/Cargo on PATH. The probed server
-has everything detected except Cargo. Install it in the user environment before
-running the full setup, and check `~/.cargo/bin/cargo --version`. The latest source
-build has more dependencies than an ordinary pure-Python package.
+including `hipcc`, and C/C++ build tools. The MI308X example disables the Rust
+multimodal extension for this text-only trial. If Rust extensions are enabled
+later, install Rust/Cargo and check `~/.cargo/bin/cargo --version`. The latest
+source build has more dependencies than an ordinary pure-Python package.
 
 ```bash
 /usr/bin/python3 scripts/setup_server.py
@@ -90,6 +92,8 @@ combination. If installation or startup fails, preserve the terminal error and
 probe report. Some GPU/backend combinations may need additional AMD components
 such as AITER; select those after examining the actual server rather than applying
 old patches or replacing the shared environment.
+Skipping Rust extensions is supported by SGLang's build script; whether this
+particular text model starts without them must still be verified on the server.
 
 ## 4. Launch LLaDA2.1-mini
 
