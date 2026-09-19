@@ -72,26 +72,33 @@ def aggregate(records):
     good = [r for r in records if r["status"] == "ok"]
     total = sum(r["answer_tokens"] for r in good)
     changed = sum(r["changed_tokens"] for r in good)
-    ever = sum(r["ever_changed_tokens"] for r in good)
-    return {
+    trace_available = all(r.get("trace_metrics_available", True) for r in good)
+    summary = {
         "selected_examples": len(records), "successful_examples": len(good),
         "failed_examples": sum(r["status"] == "error" for r in records),
         "skipped_examples": sum(r["status"] == "skipped" for r in records),
         "answer_tokens": total, "changed_tokens": changed,
         "changed_token_pct_micro": 100 * changed / total if total else None,
         "changed_token_pct_macro": sum(r["changed_token_pct"] for r in good) / len(good) if good else None,
-        "ever_changed_tokens": ever,
-        "ever_changed_token_pct_micro": 100 * ever / total if total else None,
-        "replacement_events": sum(r["replacement_events"] for r in good),
         "unchanged_examples": sum(r["unchanged"] for r in good),
         "unchanged_example_pct": 100 * sum(r["unchanged"] for r in good) / len(good) if good else None,
         "final_answer_changed_examples": sum(r["final_answer_changed"] for r in good),
         "final_answer_changed_example_pct": (
             100 * sum(r["final_answer_changed"] for r in good) / len(good) if good else None
         ),
-        "blocks_at_step_limit": sum(b["stop_reason"] == "step_limit" for r in good for b in r["blocks"]),
         "correctness_evaluated": False,
     }
+    if trace_available:
+        ever = sum(r["ever_changed_tokens"] for r in good)
+        summary.update(
+            ever_changed_tokens=ever,
+            ever_changed_token_pct_micro=100 * ever / total if total else None,
+            replacement_events=sum(r["replacement_events"] for r in good),
+            blocks_at_step_limit=sum(
+                b["stop_reason"] == "step_limit" for r in good for b in r["blocks"]
+            ),
+        )
+    return summary
 
 
 def extract_gsm8k_final_answer(text):

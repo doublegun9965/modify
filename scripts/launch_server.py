@@ -10,7 +10,9 @@ from common import ROOT, PYTHON, config, isolated_env, run_dir
 def command(cfg):
     return [str(PYTHON), "-m", "sglang.launch_server",
             "--model-path", cfg["model_path"],
-            "--dllm-algorithm", "JointThreshold", "--trust-remote-code",
+            "--dllm-algorithm", "JointThreshold",
+            "--dllm-algorithm-config", str(ROOT / "config/joint_threshold_t2t.yaml"),
+            "--dllm-fdfo", "--trust-remote-code",
             "--tp", str(cfg["tp"]), "--host", cfg["host"],
             "--port", str(cfg["port"]),
             "--mem-fraction-static", str(cfg["mem_fraction_static"]),

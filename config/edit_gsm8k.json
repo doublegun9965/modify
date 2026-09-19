@@ -3,13 +3,11 @@
   "question_field": "question",
   "answer_field": "answer",
   "t2t_threshold": 0.0,
-  "block_length": 32,
-  "max_edit_steps": 16,
   "limit": 0,
   "offset": 0,
-  "device": "cuda:0",
-  "dtype": "bfloat16",
   "max_sequence_tokens": 4096,
+  "request_timeout": 600,
+  "request_retries": 2,
   "revision": "main",
   "output_dir": "outputs/gsm8k_preservation"
 }

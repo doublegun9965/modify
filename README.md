@@ -78,17 +78,18 @@ The local JSON overrides top-level keys in `config/runtime.json`. Set optional
 build variables (for example the confirmed GPU architecture) in `build_env` and
 runtime variables in `server_env`. The MI308X example sets
 `SGLANG_DISABLE_VLLM_RMSNORM=1`: it avoids the incompatible vLLM RMSNorm path
-on this server's ROCm stack. Apply the matching project SGLang patch once after
-the source checkout exists:
+on this server's ROCm stack. Apply the project patches once after the source
+checkout exists. This installs both the ROCm compatibility change and the
+GSM8K fixed-length T2T editing extension:
 
 ```bash
 /usr/bin/python3 scripts/apply_sglang_patch.py
 ```
 
 `launch_server.py` then loads the variable automatically for each server start.
-The patch is idempotent: running the command again reports that it is already
-applied. It changes only `third_party/sglang/`, which is this project's ignored,
-dedicated source checkout.
+The command is idempotent: patches already present are reported and skipped. It
+changes only `third_party/sglang/`, which is this project's ignored, dedicated
+source checkout.
 
 ## 3. Install on the AMD server
 
@@ -180,20 +181,32 @@ OCR dataset evaluation and does not edit prompt tokens in place.
 ## 6. Measure preservation of correct GSM8K answers
 
 This experiment keeps the chat-formatted question fixed and treats the existing
-gold answer tokens as the editable region. It calls the LLaDA2.1 model directly,
-so it measures same-position token-to-token (T2T) editing rather than asking the
-model to generate a corrected copy. There are no mask tokens and no M2T
-acceptance threshold. The mask token is excluded from replacement candidates.
+gold answer tokens as the editable region. The client sends those regions to the
+project-patched SGLang server, which runs JointThreshold same-position
+token-to-token (T2T) editing. It does not ask the model to generate a corrected
+copy. There are no mask tokens and no M2T decisions; the server also excludes
+the mask token from replacement candidates.
 
 The tracked default config reads `/mnt/workspace/data/gsm8k/_test.jsonl`, uses
 the `question` and `answer` fields, and sets the T2T confidence threshold to
-`0.0`. Answer length is fixed: the experiment cannot insert or delete tokens.
-Each 32-token block is edited for at most 16 forward passes and stops early when
-a pass makes no replacement. Blocks follow the model's absolute token positions;
-an answer may start partway through the block containing the fixed prompt.
+`0.0`. The matching server settings are tracked in
+`config/joint_threshold_t2t.yaml`. Answer length is fixed: the experiment cannot
+insert or delete tokens. Blocks follow the model's absolute token positions; an
+answer may start partway through the block containing the fixed prompt.
 
-Start with a small run to verify the model, tokenizer, data fields, attention
-mask, and output files on the server:
+After pulling this version, apply the patches and restart the server. An older
+running server does not have the editing extension:
+
+```bash
+/usr/bin/python3 scripts/apply_sglang_patch.py
+.venv/bin/python scripts/launch_server.py
+```
+
+Leave that terminal running. Run the experiment from a second terminal after
+the server reports that it is ready.
+
+Start with a small run to verify the server, tokenizer, data fields and output
+files:
 
 ```bash
 .venv/bin/python scripts/edit_gsm8k.py --limit 20
@@ -208,11 +221,11 @@ Then run the full test set:
 Every invocation creates `outputs/gsm8k_preservation/run_<timestamp>/`. The
 main files are `summary.json`, all per-example data in `records.jsonl`, modified
 examples in `changed_records.jsonl`, and a changed-first `review.html` for manual
-inspection. The summary reports both the final token difference percentage and
-the percentage of positions changed at least once, because a token can change
-and later return to its original value. `final_answer_changed` compares the text
-after GSM8K's `####` marker; it is a triage signal, not a complete mathematical
-correctness judgment.
+inspection. The summary reports the final token difference percentage.
+`final_answer_changed` compares the text after GSM8K's `####` marker; it is a
+triage signal for selecting manual-review cases, not a complete mathematical
+correctness judgment. The server API returns final token IDs but no intermediate
+denoising trace, so this run does not report transient edits that later revert.
 
 For a server-specific model path or other settings, copy the tracked config to
 the ignored local override and edit only the required keys:
@@ -229,7 +242,7 @@ python scripts/setup_server.py --help
 python scripts/launch_server.py --dry-run
 python scripts/smoke_test.py --help
 python scripts/edit_gsm8k.py --help
-python -m pytest -q
+python -m pytest -q tests
 ```
 
 ## Upstream references

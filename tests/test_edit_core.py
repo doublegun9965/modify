@@ -5,7 +5,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 from edit_core import aggregate, edit_tokens, extract_gsm8k_final_answer
 
-from edit_gsm8k import token_id_list
+from edit_gsm8k import compare_tokens, token_id_list
 
 
 def test_edits_only_answer_and_counts_final_and_transient_changes():
@@ -82,3 +82,28 @@ def test_extract_and_aggregate():
 def test_token_id_list_accepts_common_tokenizer_shapes():
     assert token_id_list([1, 2]) == [1, 2]
     assert token_id_list({"input_ids": [[3, 4]]}) == [3, 4]
+
+
+def test_server_token_comparison_is_fixed_length():
+    metrics = compare_tokens([10, 11, 12], [10, 21, 12])
+    assert metrics["changed_positions"] == [1]
+    assert metrics["changed_token_pct"] == 100 / 3
+
+    try:
+        compare_tokens([10, 11], [10])
+    except ValueError as exc:
+        assert "returned 1 tokens" in str(exc)
+    else:
+        raise AssertionError("Expected a fixed-length response check")
+
+
+def test_aggregate_omits_unavailable_server_trace_metrics():
+    record = {
+        "status": "ok", "answer_tokens": 2, "changed_tokens": 1,
+        "changed_token_pct": 50.0, "unchanged": False,
+        "final_answer_changed": False,
+        "trace_metrics_available": False,
+    }
+    summary = aggregate([record])
+    assert "ever_changed_tokens" not in summary
+    assert "replacement_events" not in summary

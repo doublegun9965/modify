@@ -1,0 +1,4 @@
+threshold: 1.0
+edit_threshold: 0.0
+max_post_edit_steps: 16
+vectorized_decoding: false

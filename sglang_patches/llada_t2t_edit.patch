@@ -1,0 +1,355 @@
+diff --git a/python/sglang/srt/dllm/algorithm/base.py b/python/sglang/srt/dllm/algorithm/base.py
+index 0400c05..585cab5 100644
+--- a/python/sglang/srt/dllm/algorithm/base.py
++++ b/python/sglang/srt/dllm/algorithm/base.py
+@@ -76,11 +76,12 @@ class DllmAlgorithm:
+     ) -> DllmRunOutput:
+         batch_size = forward_batch.batch_size
+         start_list = self._block_start_list(forward_batch)
++        edit_rows = forward_batch.dllm_edit_starts >= 0
+ 
+         out = model_runner.forward(forward_batch, pp_proxy_tensors=None)
+         # No mask to denoise: return empty so process_batch_result_dllm skips the
+         # stream branch (matches the pre-refactor behavior).
+-        if all(start == self.block_size for start in start_list):
++        if all(start == self.block_size for start in start_list) and not edit_rows.any():
+             return out.logits_output, [], None, None, out.can_run_graph
+ 
+         states = self.init_step_state(forward_batch)
+@@ -97,7 +98,10 @@ class DllmAlgorithm:
+ 
+         next_token_ids = forward_batch.input_ids.view(batch_size, self.block_size)
+         next_token_ids_list = [
+-            next_token_ids[i, start_list[i] :] for i in range(batch_size)
++            next_token_ids[i]
++            if edit_rows[i]
++            else next_token_ids[i, start_list[i] :]
++            for i in range(batch_size)
+         ]
+         return out.logits_output, next_token_ids_list, None, None, out.can_run_graph
+ 
+diff --git a/python/sglang/srt/dllm/algorithm/joint_threshold.py b/python/sglang/srt/dllm/algorithm/joint_threshold.py
+index 00769a9..6ab5da9 100644
+--- a/python/sglang/srt/dllm/algorithm/joint_threshold.py
++++ b/python/sglang/srt/dllm/algorithm/joint_threshold.py
+@@ -24,6 +24,7 @@ def joint_threshold_update_step_vectorized(
+     edit_threshold: float,
+     max_post_edit_steps: int,
+     penalty_lambda: float,
++    edit_rows: torch.Tensor = None,
+ ):
+     """Batched single denoise step for joint-threshold decoding.
+ 
+@@ -37,6 +38,10 @@ def joint_threshold_update_step_vectorized(
+     input_ids = input_ids_1d.view(B, blk)
+     logits = full_logits_2d.view(B, blk, V)
+ 
++    # Edit-only requests must remain token-to-token: never select the mask token.
++    if edit_rows is not None and edit_rows.any():
++        logits[edit_rows, :, mask_id] = float("-inf")
++
+     active = ~finished
+ 
+     # ---------- penalty ----------
+@@ -138,6 +143,14 @@ class JointThreshold(DllmAlgorithm):
+         # Built once as a GPU tensor and reused across steps (no per-step
+         # host/device transfer); the FDFO carry keeps it in-process.
+         prompt_mask = input_ids != self.mask_id
++        edit_rows = forward_batch.dllm_edit_starts >= 0
++        if edit_rows.any():
++            positions = forward_batch.positions.view(batch_size, self.block_size)
++            editable = (
++                (positions >= forward_batch.dllm_edit_starts[:, None])
++                & (positions < forward_batch.dllm_edit_ends[:, None])
++            )
++            prompt_mask = torch.where(edit_rows[:, None], ~editable, prompt_mask)
+         if self._use_shared_state:
+             # One shared batched state, advanced in place across every step of the
+             # synchronous loop.
+@@ -148,6 +161,7 @@ class JointThreshold(DllmAlgorithm):
+                 "post_edit_steps": torch.zeros(
+                     batch_size, dtype=torch.int32, device=device
+                 ),
++                "edit_rows": edit_rows,
+             }
+             return [shared] * batch_size
+         return [
+@@ -155,6 +169,7 @@ class JointThreshold(DllmAlgorithm):
+                 "post_edit_steps": 0,
+                 "finished": False,
+                 "prompt_mask": prompt_mask[i],
++                "edit_only": bool(edit_rows[i].item()),
+             }
+             for i in range(batch_size)
+         ]
+@@ -196,6 +211,7 @@ class JointThreshold(DllmAlgorithm):
+             edit_threshold=self.edit_threshold,
+             max_post_edit_steps=self.max_post_edit_steps,
+             penalty_lambda=self.penalty_lambda,
++            edit_rows=shared["edit_rows"],
+         )
+         return shared["finished"].tolist()
+ 
+@@ -219,6 +235,11 @@ class JointThreshold(DllmAlgorithm):
+             dtype=torch.int32,
+             device=device,
+         )
++        edit_rows = torch.tensor(
++            [state["edit_only"] for state in states],
++            dtype=torch.bool,
++            device=device,
++        )
+ 
+         joint_threshold_update_step_vectorized(
+             input_ids_1d=forward_batch.input_ids,
+@@ -232,6 +253,7 @@ class JointThreshold(DllmAlgorithm):
+             edit_threshold=self.edit_threshold,
+             max_post_edit_steps=self.max_post_edit_steps,
+             penalty_lambda=self.penalty_lambda,
++            edit_rows=edit_rows,
+         )
+ 
+         done = finished.tolist()
+@@ -262,6 +284,9 @@ class JointThreshold(DllmAlgorithm):
+             curr_logits = full_logits[block_start:block_end]
+             curr_prompt_mask = state["prompt_mask"]
+ 
++            if state["edit_only"]:
++                curr_logits[:, self.mask_id] = float("-inf")
++
+             if self.penalty_lambda > 0:
+                 prev_ids = curr_input_ids[:-1]
+                 curr_logits[1:, :].scatter_(
+diff --git a/python/sglang/srt/dllm/mixin/req.py b/python/sglang/srt/dllm/mixin/req.py
+index ff72cd4..4169912 100644
+--- a/python/sglang/srt/dllm/mixin/req.py
++++ b/python/sglang/srt/dllm/mixin/req.py
+@@ -24,6 +24,36 @@ class ReqDllmMixin:
+         self.dllm_algo_state = None
+         self.dllm_block_offset = 0
+         self.dllm_config = dllm_config
++        self.dllm_edit_start = None
++        self.dllm_edit_end = None
++        self.dllm_edit_pad_id = None
++
++        custom_params = getattr(self.sampling_params, "custom_params", None)
++        edit_ids = (
++            custom_params.get("dllm_edit_ids")
++            if isinstance(custom_params, dict)
++            else None
++        )
++        if edit_ids is not None:
++            if self.dllm_config is None:
++                raise ValueError("dllm_edit_ids requires a dLLM server")
++            if self.dllm_config.algorithm != "JointThreshold":
++                raise ValueError("dllm_edit_ids requires JointThreshold")
++            if not isinstance(edit_ids, list) or not edit_ids or not all(
++                isinstance(token_id, int) for token_id in edit_ids
++            ):
++                raise ValueError("dllm_edit_ids must be a nonempty integer list")
++            if self.dllm_config.mask_id in edit_ids:
++                raise ValueError("dllm_edit_ids cannot contain the mask token")
++            if self.sampling_params.max_new_tokens != len(edit_ids):
++                raise ValueError("max_new_tokens must equal len(dllm_edit_ids)")
++            pad_id = custom_params.get("dllm_edit_pad_id")
++            if not isinstance(pad_id, int) or pad_id == self.dllm_config.mask_id:
++                raise ValueError("dllm_edit_pad_id must be a non-mask integer token")
++            self.output_ids = array("q", edit_ids)
++            self.dllm_edit_start = len(self.origin_input_ids)
++            self.dllm_edit_end = self.dllm_edit_start + len(edit_ids)
++            self.dllm_edit_pad_id = pad_id
+ 
+         if self.dllm_config is not None:
+             if len(self.origin_input_ids) < self.dllm_config.block_size:
+@@ -41,6 +71,18 @@ class ReqDllmMixin:
+         ]
+ 
+     def determine_dllm_phase(self: Req):
++        if self.dllm_edit_start is not None:
++            block_end = self.dllm_block_offset + self.dllm_config.block_size
++            overlaps_edit = (
++                self.dllm_block_offset < self.dllm_edit_end
++                and block_end > self.dllm_edit_start
++            )
++            self.dllm_phase = (
++                DllmReqPhase.STAGING_DECODE
++                if overlaps_edit
++                else DllmReqPhase.STAGING_PREFILL
++            )
++            return
+         if self.dllm_incomplete_ids:
+             self.dllm_phase = DllmReqPhase.STAGING_DECODE
+             return
+@@ -77,6 +119,14 @@ class ReqDllmMixin:
+             if not self.dllm_initialized
+             else self.dllm_block_offset + self.dllm_config.block_size
+         )
++        if self.dllm_edit_start is not None:
++            fill_ids = self.origin_input_ids + self.output_ids
++            padding = (-len(fill_ids)) % self.dllm_config.block_size
++            self.full_untruncated_fill_ids = fill_ids + array(
++                "q", [self.dllm_edit_pad_id] * padding
++            )
++            self.dllm_initialized = True
++            return
+         self.full_untruncated_fill_ids = (
+             self.origin_input_ids
+             + self.output_ids
+@@ -91,3 +141,5 @@ class ReqDllmMixin:
+         ), f"Unexpected prefix len: {prefix_len}"
+         if prefix_len > self.dllm_block_offset:
+             self.dllm_block_offset = prefix_len
++            if self.dllm_edit_start is not None:
++                self.determine_dllm_phase()
+diff --git a/python/sglang/srt/dllm/mixin/scheduler.py b/python/sglang/srt/dllm/mixin/scheduler.py
+index abc4b3e..6ec63e9 100644
+--- a/python/sglang/srt/dllm/mixin/scheduler.py
++++ b/python/sglang/srt/dllm/mixin/scheduler.py
+@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, List, Optional, Set, Union
+ 
+ from sglang.srt.dllm.config import DllmConfig
+ from sglang.srt.dllm.mixin.req import DllmReqPhase
+-from sglang.srt.managers.schedule_batch import Req, ScheduleBatch
++from sglang.srt.managers.schedule_batch import FINISH_LENGTH, Req, ScheduleBatch
+ from sglang.srt.managers.schedule_policy import AddReqResult, PrefillAdder
+ from sglang.srt.mem_cache.common import release_kv_cache
+ from sglang.srt.model_executor.forward_batch_info import ForwardMode
+@@ -94,6 +94,10 @@ class SchedulerDllmMixin:
+                     if new_tokens == 0:
+                         continue
+ 
++                    if req.dllm_edit_start is not None:
++                        self._commit_dllm_edit_block(req, next_token_ids, block_size)
++                        continue
++
+                     req.full_untruncated_fill_ids[
+                         req.extend_range.end - new_tokens : req.extend_range.end
+                     ] = array("q", next_token_ids)
+@@ -121,6 +125,10 @@ class SchedulerDllmMixin:
+                 req.dllm_incomplete_ids = array("q")
+                 req.dllm_algo_state = None
+ 
++                if req.dllm_edit_start is not None:
++                    self._commit_dllm_edit_block(req, next_token_ids, block_size)
++                    continue
++
+                 # Mirror the resolved block into the committed fill ids so the
+                 # prefix cache keys on the real tokens, not the mask block, next
+                 # round. Index relative to extend_range.end (the truncated/
+@@ -157,6 +165,35 @@ class SchedulerDllmMixin:
+             dp_cooperation_info=batch.dp_cooperation_info,
+         )
+ 
++    def _commit_dllm_edit_block(
++        self: Scheduler, req: Req, next_token_ids: List[int], block_size: int
++    ):
++        """Commit one resolved block while keeping the pre-seeded output fixed-size."""
++        if len(next_token_ids) != block_size:
++            raise ValueError("An editable dLLM block must return one full block")
++
++        req.full_untruncated_fill_ids[
++            req.extend_range.end - block_size : req.extend_range.end
++        ] = array("q", next_token_ids)
++
++        block_start = req.dllm_block_offset
++        overlap_start = max(block_start, req.dllm_edit_start)
++        overlap_end = min(block_start + block_size, req.dllm_edit_end)
++        if overlap_start < overlap_end:
++            source_start = overlap_start - block_start
++            output_start = overlap_start - req.dllm_edit_start
++            length = overlap_end - overlap_start
++            req.output_ids[output_start : output_start + length] = array(
++                "q", next_token_ids[source_start : source_start + length]
++            )
++            self.metrics_reporter.num_generated_tokens += length
++
++        if block_start + block_size >= req.dllm_edit_end:
++            req.finished_reason = FINISH_LENGTH(length=len(req.output_ids))
++            req.finished_len = len(req.output_ids)
++            release_kv_cache(req, self.tree_cache)
++            req.time_stats.set_completion_time()
++
+     def _fetch_waiting_reqs(self: Scheduler):
+         # Calculate how many requests can be added to DLLM manager
+         max_dllm_capacity = self.dllm_config.max_running_requests - len(
+diff --git a/python/sglang/srt/entrypoints/http_server.py b/python/sglang/srt/entrypoints/http_server.py
+index fe9697a..a4cbb2c 100644
+--- a/python/sglang/srt/entrypoints/http_server.py
++++ b/python/sglang/srt/entrypoints/http_server.py
+@@ -740,6 +740,7 @@ async def model_info():
+     """Get the model information."""
+     model_config = _global_state.tokenizer_manager.model_config
+     result = {
++        "project_dllm_t2t_edit_api": 1,
+         "model_path": _global_state.tokenizer_manager.model_path,
+         # Manager-owned, and moved by a weight update alongside `model_path`:
+         # this is where a client reads the identity the server answers under.
+diff --git a/python/sglang/srt/managers/schedule_batch.py b/python/sglang/srt/managers/schedule_batch.py
+index 3ff2a29..ab62eef 100755
+--- a/python/sglang/srt/managers/schedule_batch.py
++++ b/python/sglang/srt/managers/schedule_batch.py
+@@ -1322,6 +1322,12 @@ class Req(ReqDllmMixin):
+         # avoiding an O(context) copy per prefill-batch build.
+         token_ids_to_match = self.full_untruncated_fill_ids
+         key_limit: Optional[int] = self._compute_max_prefix_len(input_len)
++        if self.dllm_edit_start is not None:
++            # Never let a cached answer block bypass the editing forward pass.
++            edit_block_start = (
++                self.dllm_edit_start // self.dllm_config.block_size
++            ) * self.dllm_config.block_size
++            key_limit = min(key_limit, edit_block_start)
+ 
+         # SWA lives in a per-request ring that's not content-stable and is never
+         # stored in the radix tree, so a reused prefix carries stale SWA. Cap the
+diff --git a/python/sglang/srt/managers/scheduler_components/output_streamer.py b/python/sglang/srt/managers/scheduler_components/output_streamer.py
+index 18a4240..419d4b0 100644
+--- a/python/sglang/srt/managers/scheduler_components/output_streamer.py
++++ b/python/sglang/srt/managers/scheduler_components/output_streamer.py
+@@ -360,6 +360,10 @@ class _GenerationStreamAccumulator:
+             self.output_token_sampling_logprobs = []
+ 
+     def accept(self, *, req: Req) -> None:
++        # Edit-only dLLM requests pre-seed output_ids with the source text.
++        # Do not expose that mutable buffer before every editable block is done.
++        if req.dllm_edit_start is not None and not req.finished():
++            return
+         if req.finished():
+             assert not req.finished_output
+             req.finished_output = True
+diff --git a/python/sglang/srt/model_executor/forward_batch_info.py b/python/sglang/srt/model_executor/forward_batch_info.py
+index 0212e80..56f2c80 100644
+--- a/python/sglang/srt/model_executor/forward_batch_info.py
++++ b/python/sglang/srt/model_executor/forward_batch_info.py
+@@ -491,6 +491,9 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
+     # === Forward-derived (built in init_new on the forward stream; FB-owned) ===
+     # Position information
+     positions: torch.Tensor = None
++    # Absolute half-open editable intervals for project-specific dLLM T2T requests.
++    dllm_edit_starts: Optional[torch.Tensor] = None
++    dllm_edit_ends: Optional[torch.Tensor] = None
+ 
+     # For extend
+     extend_num_tokens: Optional[int] = None
+@@ -860,6 +863,22 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
+                 ],
+                 dtype=positions_dtype,
+             ).to(device, non_blocking=True)
++            ret.dllm_edit_starts = torch.tensor(
++                [
++                    -1 if req.dllm_edit_start is None else req.dllm_edit_start
++                    for req in batch.reqs
++                ],
++                dtype=positions_dtype,
++                device=device,
++            )
++            ret.dllm_edit_ends = torch.tensor(
++                [
++                    -1 if req.dllm_edit_end is None else req.dllm_edit_end
++                    for req in batch.reqs
++                ],
++                dtype=positions_dtype,
++                device=device,
++            )
+         elif (
+             ret.spec_info is not None
+             and getattr(ret.spec_info, "positions", None) is not None
