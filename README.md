@@ -177,6 +177,50 @@ The script saves its input, response, timing and any error under a new
 The prompt asks for a corrected copy of synthetic OCR-like text; this is not an
 OCR dataset evaluation and does not edit prompt tokens in place.
 
+## 6. Measure preservation of correct GSM8K answers
+
+This experiment keeps the chat-formatted question fixed and treats the existing
+gold answer tokens as the editable region. It calls the LLaDA2.1 model directly,
+so it measures same-position token-to-token (T2T) editing rather than asking the
+model to generate a corrected copy. There are no mask tokens and no M2T
+acceptance threshold. The mask token is excluded from replacement candidates.
+
+The tracked default config reads `/mnt/workspace/data/gsm8k/_test.jsonl`, uses
+the `question` and `answer` fields, and sets the T2T confidence threshold to
+`0.0`. Answer length is fixed: the experiment cannot insert or delete tokens.
+Each 32-token block is edited for at most 16 forward passes and stops early when
+a pass makes no replacement. Blocks follow the model's absolute token positions;
+an answer may start partway through the block containing the fixed prompt.
+
+Start with a small run to verify the model, tokenizer, data fields, attention
+mask, and output files on the server:
+
+```bash
+.venv/bin/python scripts/edit_gsm8k.py --limit 20
+```
+
+Then run the full test set:
+
+```bash
+.venv/bin/python scripts/edit_gsm8k.py
+```
+
+Every invocation creates `outputs/gsm8k_preservation/run_<timestamp>/`. The
+main files are `summary.json`, all per-example data in `records.jsonl`, modified
+examples in `changed_records.jsonl`, and a changed-first `review.html` for manual
+inspection. The summary reports both the final token difference percentage and
+the percentage of positions changed at least once, because a token can change
+and later return to its original value. `final_answer_changed` compares the text
+after GSM8K's `####` marker; it is a triage signal, not a complete mathematical
+correctness judgment.
+
+For a server-specific model path or other settings, copy the tracked config to
+the ignored local override and edit only the required keys:
+
+```bash
+cp config/edit_gsm8k.json config/edit_gsm8k.local.json
+```
+
 ## Local checks (no venv)
 
 ```bash
@@ -184,6 +228,8 @@ python -m compileall -q scripts
 python scripts/setup_server.py --help
 python scripts/launch_server.py --dry-run
 python scripts/smoke_test.py --help
+python scripts/edit_gsm8k.py --help
+python -m pytest -q
 ```
 
 ## Upstream references
