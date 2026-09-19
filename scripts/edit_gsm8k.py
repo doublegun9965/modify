@@ -13,7 +13,7 @@ import time
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-from common import ROOT, config as runtime_config
+from common import ROOT, config as runtime_config, dllm_algorithm_config, yaml_float
 from edit_core import aggregate, extract_gsm8k_final_answer
 
 
@@ -50,13 +50,15 @@ def arguments():
         parser.add_argument("--" + name)
     for name in ("limit", "offset", "max-sequence-tokens", "request-timeout", "request-retries"):
         parser.add_argument("--" + name, type=int)
-    parser.add_argument("--t2t-threshold", type=float)
     parser.add_argument("--dry-run", action="store_true", help="Validate config/data without contacting the server")
     args = parser.parse_args()
     cfg = json.loads((ROOT / "config/edit_gsm8k.json").read_text(encoding="utf-8"))
     runtime = runtime_config()
     cfg["model_path"] = runtime["model_path"]
     cfg["server_url"] = f"http://{runtime['host']}:{runtime['port']}"
+    algorithm_config = dllm_algorithm_config()
+    cfg["t2t_threshold"] = yaml_float(algorithm_config, "edit_threshold")
+    cfg["algorithm_config"] = str(algorithm_config)
     override = args.config or ROOT / "config/edit_gsm8k.local.json"
     if args.config or override.exists():
         extra = json.loads(override.read_text(encoding="utf-8"))
@@ -65,8 +67,8 @@ def arguments():
             parser.error("Unknown configuration keys: " + ", ".join(sorted(unknown)))
         cfg.update(extra)
     cfg.update({k: v for k, v in vars(args).items() if v is not None and k not in ("config", "dry_run")})
-    if cfg["t2t_threshold"] != 0:
-        parser.error("This experiment currently requires t2t_threshold=0")
+    if not 0 <= cfg["t2t_threshold"] <= 1:
+        parser.error("edit_threshold in the algorithm config must be in [0, 1]")
     for name in ("max_sequence_tokens", "request_timeout"):
         if not isinstance(cfg[name], int) or cfg[name] < 1:
             parser.error(name + " must be a positive integer")

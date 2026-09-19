@@ -6,6 +6,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 from edit_core import aggregate, edit_tokens, extract_gsm8k_final_answer
 
 from edit_gsm8k import compare_tokens, token_id_list
+from common import ROOT, yaml_float
 
 
 def test_edits_only_answer_and_counts_final_and_transient_changes():
@@ -107,3 +108,8 @@ def test_aggregate_omits_unavailable_server_trace_metrics():
     summary = aggregate([record])
     assert "ever_changed_tokens" not in summary
     assert "replacement_events" not in summary
+
+
+def test_reads_threshold_from_yaml():
+    path = ROOT / "config" / "joint_threshold_t2t.yaml"
+    assert yaml_float(path, "edit_threshold") == 0.0

@@ -10,6 +10,24 @@ VENV = ROOT / ".venv"
 PYTHON = VENV / "bin" / "python"
 
 
+def dllm_algorithm_config():
+    """Prefer an ignored server-local threshold config when it exists."""
+    local = ROOT / "config" / "joint_threshold_t2t.local.yaml"
+    return local if local.exists() else ROOT / "config" / "joint_threshold_t2t.yaml"
+
+
+def yaml_float(path, key):
+    """Read one top-level numeric scalar without adding a YAML dependency."""
+    for raw_line in Path(path).read_text(encoding="utf-8").splitlines():
+        line = raw_line.split("#", 1)[0].strip()
+        if line.startswith(key + ":"):
+            try:
+                return float(line.split(":", 1)[1].strip())
+            except ValueError as exc:
+                raise ValueError(f"{path}: {key} must be numeric") from exc
+    raise ValueError(f"{path}: missing {key}")
+
+
 def config():
     result = json.loads((ROOT / "config/runtime.json").read_text(encoding="utf-8"))
     override = ROOT / "config/runtime.local.json"

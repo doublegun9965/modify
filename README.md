@@ -194,6 +194,18 @@ the `question` and `answer` fields, and sets the T2T confidence threshold to
 insert or delete tokens. Blocks follow the model's absolute token positions; an
 answer may start partway through the block containing the fixed prompt.
 
+Threshold 0 is maximally aggressive. For threshold experiments, create the
+ignored server-local configuration and edit its `edit_threshold` value:
+
+```bash
+cp config/joint_threshold_t2t.yaml config/joint_threshold_t2t.local.yaml
+sed -i 's/^edit_threshold:.*/edit_threshold: 0.9/' config/joint_threshold_t2t.local.yaml
+```
+
+Both the launcher and evaluation client automatically select this local file,
+and each run records its path and effective threshold. Restart the server after
+every threshold change so the new value takes effect.
+
 After pulling this version, apply the patches and restart the server. An older
 running server does not have the editing extension:
 

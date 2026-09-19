@@ -4,14 +4,14 @@ import json
 import os
 import shlex
 
-from common import ROOT, PYTHON, config, isolated_env, run_dir
+from common import ROOT, PYTHON, config, dllm_algorithm_config, isolated_env, run_dir
 
 
 def command(cfg):
     return [str(PYTHON), "-m", "sglang.launch_server",
             "--model-path", cfg["model_path"],
             "--dllm-algorithm", "JointThreshold",
-            "--dllm-algorithm-config", str(ROOT / "config/joint_threshold_t2t.yaml"),
+            "--dllm-algorithm-config", str(dllm_algorithm_config()),
             "--dllm-fdfo", "--trust-remote-code",
             "--tp", str(cfg["tp"]), "--host", cfg["host"],
             "--port", str(cfg["port"]),

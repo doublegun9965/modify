@@ -7,3 +7,4 @@ __pycache__/
 *.pyc
 *.local.json
 *.local.env
+*.local.yaml
