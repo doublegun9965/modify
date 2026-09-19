@@ -187,7 +187,7 @@ token-to-token (T2T) editing. It does not ask the model to generate a corrected
 copy. There are no mask tokens and no M2T decisions; the server also excludes
 the mask token from replacement candidates.
 
-The tracked default config reads `/mnt/workspace/data/gsm8k/_test.jsonl`, uses
+The tracked default config reads `/mnt/workspace/data/gsm8k_test.jsonl`, uses
 the `question` and `answer` fields, and sets the T2T confidence threshold to
 `0.0`. The matching server settings are tracked in
 `config/joint_threshold_t2t.yaml`. Answer length is fixed: the experiment cannot

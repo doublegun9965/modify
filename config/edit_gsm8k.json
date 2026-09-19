@@ -1,5 +1,5 @@
 {
-  "dataset": "/mnt/workspace/data/gsm8k/_test.jsonl",
+  "dataset": "/mnt/workspace/data/gsm8k_test.jsonl",
   "question_field": "question",
   "answer_field": "answer",
   "t2t_threshold": 0.0,
