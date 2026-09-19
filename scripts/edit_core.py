@@ -72,7 +72,10 @@ def aggregate(records):
     good = [r for r in records if r["status"] == "ok"]
     total = sum(r["answer_tokens"] for r in good)
     changed = sum(r["changed_tokens"] for r in good)
-    trace_available = all(r.get("trace_metrics_available", True) for r in good)
+    legacy_trace_available = all(
+        all(key in r for key in ("ever_changed_tokens", "replacement_events", "blocks"))
+        for r in good
+    )
     summary = {
         "selected_examples": len(records), "successful_examples": len(good),
         "failed_examples": sum(r["status"] == "error" for r in records),
@@ -88,7 +91,7 @@ def aggregate(records):
         ),
         "correctness_evaluated": False,
     }
-    if trace_available:
+    if legacy_trace_available:
         ever = sum(r["ever_changed_tokens"] for r in good)
         summary.update(
             ever_changed_tokens=ever,

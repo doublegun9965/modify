@@ -1,0 +1,268 @@
+diff --git a/python/sglang/srt/dllm/algorithm/base.py b/python/sglang/srt/dllm/algorithm/base.py
+index 585cab5..d08f56e 100644
+--- a/python/sglang/srt/dllm/algorithm/base.py
++++ b/python/sglang/srt/dllm/algorithm/base.py
+@@ -19,6 +19,7 @@ DllmRunOutput = Tuple[
+     List,
+     Optional[List[int]],
+     Optional[List[Any]],
++    Optional[List[Any]],
+     bool,
+ ]
+ 
+@@ -82,7 +83,7 @@ class DllmAlgorithm:
+         # No mask to denoise: return empty so process_batch_result_dllm skips the
+         # stream branch (matches the pre-refactor behavior).
+         if all(start == self.block_size for start in start_list) and not edit_rows.any():
+-            return out.logits_output, [], None, None, out.can_run_graph
++            return out.logits_output, [], None, None, None, out.can_run_graph
+ 
+         states = self.init_step_state(forward_batch)
+         # NPU: attention metadata is stable across a block's denoise steps (the
+@@ -103,7 +104,18 @@ class DllmAlgorithm:
+             else next_token_ids[i, start_list[i] :]
+             for i in range(batch_size)
+         ]
+-        return out.logits_output, next_token_ids_list, None, None, out.can_run_graph
++        edit_traces = [
++            state.get("edit_trace") if isinstance(state, dict) else None
++            for state in states
++        ]
++        return (
++            out.logits_output,
++            next_token_ids_list,
++            None,
++            None,
++            edit_traces,
++            out.can_run_graph,
++        )
+ 
+     def _run_fdfo(
+         self,
+@@ -133,11 +145,16 @@ class DllmAlgorithm:
+             batch_size, self.block_size
+         ).tolist()
+         states_out = [None if done[i] else states[i] for i in range(batch_size)]
++        edit_traces = [
++            state.get("edit_trace") if done[i] and isinstance(state, dict) else None
++            for i, state in enumerate(states)
++        ]
+ 
+         return (
+             out.logits_output,
+             next_token_ids_list,
+             accept_length_per_req_cpu,
+             states_out,
++            edit_traces,
+             out.can_run_graph,
+         )
+diff --git a/python/sglang/srt/dllm/algorithm/joint_threshold.py b/python/sglang/srt/dllm/algorithm/joint_threshold.py
+index 6ab5da9..8011514 100644
+--- a/python/sglang/srt/dllm/algorithm/joint_threshold.py
++++ b/python/sglang/srt/dllm/algorithm/joint_threshold.py
+@@ -144,6 +144,7 @@ class JointThreshold(DllmAlgorithm):
+         # host/device transfer); the FDFO carry keeps it in-process.
+         prompt_mask = input_ids != self.mask_id
+         edit_rows = forward_batch.dllm_edit_starts >= 0
++        trace_rows = edit_rows & forward_batch.dllm_edit_trace_enabled
+         if edit_rows.any():
+             positions = forward_batch.positions.view(batch_size, self.block_size)
+             editable = (
+@@ -151,7 +152,7 @@ class JointThreshold(DllmAlgorithm):
+                 & (positions < forward_batch.dllm_edit_ends[:, None])
+             )
+             prompt_mask = torch.where(edit_rows[:, None], ~editable, prompt_mask)
+-        if self._use_shared_state:
++        if self._use_shared_state and not trace_rows.any():
+             # One shared batched state, advanced in place across every step of the
+             # synchronous loop.
+             device = forward_batch.input_ids.device
+@@ -170,6 +171,9 @@ class JointThreshold(DllmAlgorithm):
+                 "finished": False,
+                 "prompt_mask": prompt_mask[i],
+                 "edit_only": bool(edit_rows[i].item()),
++                "trace_enabled": bool(trace_rows[i].item()),
++                "trace_step": 0,
++                "edit_trace": [],
+             }
+             for i in range(batch_size)
+         ]
+@@ -180,11 +184,13 @@ class JointThreshold(DllmAlgorithm):
+         full_logits: torch.Tensor,
+         states: List[Any],
+     ) -> List[bool]:
+-        if self._use_shared_state:
++        if self._use_shared_state and "prompt_masks" in states[0]:
+             return self._step_vectorized_shared(
+                 forward_batch=forward_batch, full_logits=full_logits, states=states
+             )
+-        if self.vectorized_decoding:
++        if self.vectorized_decoding and not any(
++            state.get("trace_enabled", False) for state in states
++        ):
+             return self._step_vectorized_fdfo(
+                 forward_batch=forward_batch, full_logits=full_logits, states=states
+             )
+@@ -283,6 +289,7 @@ class JointThreshold(DllmAlgorithm):
+             curr_input_ids = forward_batch.input_ids[block_start:block_end]
+             curr_logits = full_logits[block_start:block_end]
+             curr_prompt_mask = state["prompt_mask"]
++            state["trace_step"] += 1
+ 
+             if state["edit_only"]:
+                 curr_logits[:, self.mask_id] = float("-inf")
+@@ -327,6 +334,34 @@ class JointThreshold(DllmAlgorithm):
+                 edit_transfer_index = (
+                     (p > self.edit_threshold) & (curr_input_ids != x) & edit_mask
+                 )
++                if state["trace_enabled"] and edit_transfer_index.any():
++                    selected = torch.nonzero(
++                        edit_transfer_index, as_tuple=False
++                    ).flatten()
++                    positions = forward_batch.positions[block_start:block_end]
++                    state["edit_trace"].append(
++                        {
++                            "block_start": int(positions[0].item()),
++                            "block_end": int(positions[-1].item()) + 1,
++                            "step": state["trace_step"],
++                            "changes": [
++                                {
++                                    "absolute_position": int(position),
++                                    "block_position": int(index),
++                                    "old_id": int(old_id),
++                                    "new_id": int(new_id),
++                                    "confidence": float(confidence),
++                                }
++                                for index, position, old_id, new_id, confidence in zip(
++                                    selected.tolist(),
++                                    positions[selected].tolist(),
++                                    curr_input_ids[selected].tolist(),
++                                    x[selected].tolist(),
++                                    p[selected].tolist(),
++                                )
++                            ],
++                        }
++                    )
+                 transfer_index = mask_transfer_index | edit_transfer_index
+                 if transfer_index.any():
+                     curr_input_ids[transfer_index] = x[transfer_index]
+diff --git a/python/sglang/srt/dllm/mixin/req.py b/python/sglang/srt/dllm/mixin/req.py
+index 4169912..f18d7d6 100644
+--- a/python/sglang/srt/dllm/mixin/req.py
++++ b/python/sglang/srt/dllm/mixin/req.py
+@@ -27,6 +27,8 @@ class ReqDllmMixin:
+         self.dllm_edit_start = None
+         self.dllm_edit_end = None
+         self.dllm_edit_pad_id = None
++        self.dllm_edit_trace_enabled = False
++        self.dllm_edit_trace = []
+ 
+         custom_params = getattr(self.sampling_params, "custom_params", None)
+         edit_ids = (
+@@ -54,6 +56,10 @@ class ReqDllmMixin:
+             self.dllm_edit_start = len(self.origin_input_ids)
+             self.dllm_edit_end = self.dllm_edit_start + len(edit_ids)
+             self.dllm_edit_pad_id = pad_id
++            trace_enabled = custom_params.get("dllm_edit_trace", False)
++            if not isinstance(trace_enabled, bool):
++                raise ValueError("dllm_edit_trace must be a boolean")
++            self.dllm_edit_trace_enabled = trace_enabled
+ 
+         if self.dllm_config is not None:
+             if len(self.origin_input_ids) < self.dllm_config.block_size:
+diff --git a/python/sglang/srt/dllm/mixin/scheduler.py b/python/sglang/srt/dllm/mixin/scheduler.py
+index 6ec63e9..4e85b7f 100644
+--- a/python/sglang/srt/dllm/mixin/scheduler.py
++++ b/python/sglang/srt/dllm/mixin/scheduler.py
+@@ -87,6 +87,10 @@ class SchedulerDllmMixin:
+             self.token_to_kv_pool_allocator.free_group_begin()
+             for idx in range(batch.batch_size()):
+                 req = batch.reqs[idx]
++                if result.dllm_edit_traces is not None:
++                    block_trace = result.dllm_edit_traces[idx]
++                    if block_trace:
++                        req.dllm_edit_trace.extend(block_trace)
+ 
+                 if not fdfo_mode:
+                     next_token_ids = result.next_token_ids[idx].tolist()
+@@ -189,6 +193,12 @@ class SchedulerDllmMixin:
+             self.metrics_reporter.num_generated_tokens += length
+ 
+         if block_start + block_size >= req.dllm_edit_end:
++            if req.dllm_edit_trace_enabled:
++                if req.customized_info is None:
++                    req.customized_info = {}
++                req.customized_info["dllm_edit_trace"] = [req.dllm_edit_trace] + [
++                    None
++                ] * (len(req.output_ids) - 1)
+             req.finished_reason = FINISH_LENGTH(length=len(req.output_ids))
+             req.finished_len = len(req.output_ids)
+             release_kv_cache(req, self.tree_cache)
+diff --git a/python/sglang/srt/entrypoints/http_server.py b/python/sglang/srt/entrypoints/http_server.py
+index a4cbb2c..01d7207 100644
+--- a/python/sglang/srt/entrypoints/http_server.py
++++ b/python/sglang/srt/entrypoints/http_server.py
+@@ -741,6 +741,7 @@ async def model_info():
+     model_config = _global_state.tokenizer_manager.model_config
+     result = {
+         "project_dllm_t2t_edit_api": 1,
++        "project_dllm_t2t_trace_api": 1,
+         "model_path": _global_state.tokenizer_manager.model_path,
+         # Manager-owned, and moved by a weight update alongside `model_path`:
+         # this is where a client reads the identity the server answers under.
+diff --git a/python/sglang/srt/managers/tp_worker.py b/python/sglang/srt/managers/tp_worker.py
+index a7a1ef3..ec05306 100644
+--- a/python/sglang/srt/managers/tp_worker.py
++++ b/python/sglang/srt/managers/tp_worker.py
+@@ -560,6 +560,7 @@ class TpModelWorker(BaseTpWorker):
+             next_token_ids,
+             accept_length_per_req_cpu,
+             dllm_algo_state,
++            dllm_edit_traces,
+             can_run_cuda_graph,
+         ) = self.dllm_algorithm.run(self.model_runner, forward_batch, algo_states)
+ 
+@@ -568,6 +569,7 @@ class TpModelWorker(BaseTpWorker):
+             next_token_ids=next_token_ids,
+             accept_length_per_req_cpu=accept_length_per_req_cpu,
+             dllm_algo_state=dllm_algo_state,
++            dllm_edit_traces=dllm_edit_traces,
+             can_run_cuda_graph=can_run_cuda_graph,
+         )
+ 
+diff --git a/python/sglang/srt/managers/utils.py b/python/sglang/srt/managers/utils.py
+index 69d00c9..6b37f75 100644
+--- a/python/sglang/srt/managers/utils.py
++++ b/python/sglang/srt/managers/utils.py
+@@ -54,6 +54,7 @@ class GenerationBatchResult:
+     # FDFO dLLM batching: per-request accepted block length and carried algo state.
+     accept_length_per_req_cpu: Optional[List[int]] = None
+     dllm_algo_state: Optional[List[Any]] = None
++    dllm_edit_traces: Optional[List[Any]] = None
+     can_run_cuda_graph: bool = False
+ 
+     # PP skip output comm: True when output send/recv was skipped and
+diff --git a/python/sglang/srt/model_executor/forward_batch_info.py b/python/sglang/srt/model_executor/forward_batch_info.py
+index 56f2c80..a0f7017 100644
+--- a/python/sglang/srt/model_executor/forward_batch_info.py
++++ b/python/sglang/srt/model_executor/forward_batch_info.py
+@@ -494,6 +494,7 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
+     # Absolute half-open editable intervals for project-specific dLLM T2T requests.
+     dllm_edit_starts: Optional[torch.Tensor] = None
+     dllm_edit_ends: Optional[torch.Tensor] = None
++    dllm_edit_trace_enabled: Optional[torch.Tensor] = None
+ 
+     # For extend
+     extend_num_tokens: Optional[int] = None
+@@ -879,6 +880,11 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
+                 dtype=positions_dtype,
+                 device=device,
+             )
++            ret.dllm_edit_trace_enabled = torch.tensor(
++                [req.dllm_edit_trace_enabled for req in batch.reqs],
++                dtype=torch.bool,
++                device=device,
++            )
+         elif (
+             ret.spec_info is not None
+             and getattr(ret.spec_info, "positions", None) is not None

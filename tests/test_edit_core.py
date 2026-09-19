@@ -5,7 +5,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 from edit_core import aggregate, edit_tokens, extract_gsm8k_final_answer
 
-from edit_gsm8k import compare_tokens, token_id_list
+from edit_gsm8k import (
+    compare_tokens,
+    enrich_edit_trace,
+    extract_edit_trace,
+    trace_report_html,
+    token_id_list,
+)
 from common import ROOT, yaml_float
 
 
@@ -113,3 +119,60 @@ def test_aggregate_omits_unavailable_server_trace_metrics():
 def test_reads_threshold_from_yaml():
     path = ROOT / "config" / "joint_threshold_t2t.yaml"
     assert yaml_float(path, "edit_threshold") == 0.0
+
+
+def test_extracts_and_replays_server_edit_trace():
+    raw = [
+        {"block_start": 8, "block_end": 16, "step": 1, "changes": [
+            {"absolute_position": 11, "block_position": 3,
+             "old_id": 20, "new_id": 90, "confidence": 0.95},
+        ]},
+        {"block_start": 8, "block_end": 16, "step": 2, "changes": [
+            {"absolute_position": 12, "block_position": 4,
+             "old_id": 30, "new_id": 91, "confidence": 0.91},
+        ]},
+    ]
+    meta = {"dllm_edit_trace": [raw, None, None]}
+    assert extract_edit_trace(meta) == raw
+
+    decode = lambda ids: " ".join(map(str, ids))
+    rounds, exact = enrich_edit_trace(
+        raw, prefix_length=10, original=[10, 20, 30], edited=[10, 90, 91],
+        decode=decode,
+    )
+    assert exact is True
+    assert [item["answer_position"] for item in rounds[0]["changes"]] == [1]
+    assert rounds[0]["answer_after"] == "10 90 30"
+    assert rounds[1]["answer_after"] == "10 90 91"
+
+
+def test_trace_replay_rejects_mismatched_old_token():
+    raw = [{"block_start": 0, "block_end": 8, "step": 1, "changes": [
+        {"absolute_position": 2, "block_position": 2,
+         "old_id": 999, "new_id": 3, "confidence": 0.9},
+    ]}]
+    try:
+        enrich_edit_trace(raw, 1, [1, 2], [1, 3], lambda ids: str(ids))
+    except ValueError as exc:
+        assert "old token mismatch" in str(exc)
+    else:
+        raise AssertionError("Expected a trace mismatch to fail")
+
+
+def test_trace_report_is_human_readable():
+    text = trace_report_html([{
+        "status": "ok", "index": 7, "unchanged": False, "changed_tokens": 1,
+        "question": "Question?", "original_answer": "old", "edited_answer": "new",
+        "edit_trace": [{
+            "round": 1, "answer_block_start": 0, "answer_block_end": 3,
+            "block_step": 2, "context_before": "old", "context_after": "new",
+            "answer_after": "new", "changes": [{
+                "answer_position": 1, "old_text": "o", "new_text": "n",
+                "old_id": 10, "new_id": 11, "confidence": 0.987654,
+            }],
+        }],
+    }])
+    assert "GSM8K token-edit timeline" in text
+    assert "Round 1" in text
+    assert "0.987654" in text
+    assert "Full answer after this round" in text

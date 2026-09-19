@@ -232,12 +232,23 @@ Then run the full test set:
 
 Every invocation creates `outputs/gsm8k_preservation/run_<timestamp>/`. The
 main files are `summary.json`, all per-example data in `records.jsonl`, modified
-examples in `changed_records.jsonl`, and a changed-first `review.html` for manual
-inspection. The summary reports the final token difference percentage.
+examples in `changed_records.jsonl`, a changed-first `review.html`, and
+`trace_report.html`. Open `trace_report.html` for manual inspection: it presents
+each editing round as a timeline with answer-relative positions, old and new
+tokens, selected-token confidence, local before/after context, and the complete
+answer after that round. The JSONL files retain the same trace as structured
+data for later analysis.
+
+Tracing is requested only by the project editing client. It adds synchronization
+and response-size overhead, so use it for diagnostic experiments rather than
+throughput benchmarking. The client replays every trace locally and fails the
+example if the replay does not exactly reproduce the server's final token IDs.
+The summary reports both the final token difference percentage and the number of
+intermediate edit rounds and replacement events, including edits that later
+revert.
 `final_answer_changed` compares the text after GSM8K's `####` marker; it is a
 triage signal for selecting manual-review cases, not a complete mathematical
-correctness judgment. The server API returns final token IDs but no intermediate
-denoising trace, so this run does not report transient edits that later revert.
+correctness judgment.
 
 For a server-specific model path or other settings, copy the tracked config to
 the ignored local override and edit only the required keys:

@@ -126,7 +126,11 @@ def generate(cfg, prefix_ids, answer_ids, pad_id):
             "temperature": 0.0,
             "max_new_tokens": len(answer_ids),
             "ignore_eos": True,
-            "custom_params": {"dllm_edit_ids": answer_ids, "dllm_edit_pad_id": pad_id},
+            "custom_params": {
+                "dllm_edit_ids": answer_ids,
+                "dllm_edit_pad_id": pad_id,
+                "dllm_edit_trace": True,
+            },
         },
     }
     last_error = None
@@ -150,6 +154,59 @@ def compare_tokens(original, edited):
         "changed_token_pct": 100 * len(changed) / len(original),
         "unchanged": not changed, "changed_positions": changed,
     }
+
+
+def extract_edit_trace(meta_info):
+    """Extract the one request-level trace stored in token-aligned metadata."""
+    slots = meta_info.get("dllm_edit_trace", []) if isinstance(meta_info, dict) else []
+    if not isinstance(slots, list):
+        raise ValueError("Server returned a malformed dllm_edit_trace")
+    for value in slots:
+        if value is not None:
+            if not isinstance(value, list):
+                raise ValueError("Server returned a malformed trace payload")
+            return value
+    return []
+
+
+def enrich_edit_trace(raw_trace, prefix_length, original, edited, decode):
+    """Replay server events and add decoded, answer-relative views for review."""
+    current = list(original)
+    rounds = []
+    for sequence_number, raw_round in enumerate(raw_trace, 1):
+        before = list(current)
+        changes = []
+        for raw_change in raw_round.get("changes", []):
+            answer_position = raw_change["absolute_position"] - prefix_length
+            if not 0 <= answer_position < len(current):
+                raise ValueError(f"Trace position {answer_position} is outside the answer")
+            if current[answer_position] != raw_change["old_id"]:
+                raise ValueError(
+                    f"Trace old token mismatch at answer position {answer_position}"
+                )
+            change = dict(raw_change, answer_position=answer_position,
+                          old_text=decode([raw_change["old_id"]]),
+                          new_text=decode([raw_change["new_id"]]))
+            changes.append(change)
+        for change in changes:
+            current[change["answer_position"]] = change["new_id"]
+        changed_positions = [change["answer_position"] for change in changes]
+        left = max(0, min(changed_positions) - 6)
+        right = min(len(current), max(changed_positions) + 7)
+        rounds.append({
+            "round": sequence_number,
+            "block_start_absolute": raw_round["block_start"],
+            "answer_block_start": max(0, raw_round["block_start"] - prefix_length),
+            "answer_block_end": min(
+                len(current), raw_round["block_end"] - prefix_length
+            ),
+            "block_step": raw_round["step"],
+            "changes": changes,
+            "context_before": decode(before[left:right]),
+            "context_after": decode(current[left:right]),
+            "answer_after": decode(current),
+        })
+    return rounds, current == list(edited)
 
 
 def render_review(path, records):
@@ -177,6 +234,68 @@ def render_review(path, records):
     path.write_text("\n".join(sections) + "</html>", encoding="utf-8")
 
 
+def trace_report_html(records):
+    ok = [record for record in records if record.get("status") == "ok"]
+    changed = [record for record in ok if not record["unchanged"]]
+    rounds = sum(len(record.get("edit_trace", [])) for record in ok)
+    events = sum(len(item["changes"]) for record in ok
+                 for item in record.get("edit_trace", []))
+    sections = ["<!doctype html><html><head><meta charset='utf-8'>",
+                "<title>GSM8K T2T edit trace</title>",
+                "<style>:root{color-scheme:light}body{font:15px/1.55 system-ui;max-width:1500px;margin:auto;padding:32px;color:#172033}"
+                ".summary,.round{border:1px solid #d8deea;border-radius:12px;padding:16px;margin:14px 0;background:#fff}"
+                ".pair{display:grid;grid-template-columns:1fr 1fr;gap:18px}.muted{color:#657086}"
+                "pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#f6f8fb;padding:14px;border-radius:8px}"
+                "table{border-collapse:collapse;width:100%}th,td{border-bottom:1px solid #e4e8f0;padding:8px;text-align:left;vertical-align:top}"
+                "code{background:#eef2f8;padding:2px 5px;border-radius:4px}.bad{color:#a12622}.good{color:#176b3a}"
+                "details.example{border-top:2px solid #d8deea;padding:14px 0}summary{cursor:pointer;font-weight:650}"
+                "@media(max-width:850px){.pair{grid-template-columns:1fr}}</style></head><body>",
+                "<h1>GSM8K token-edit timeline</h1>",
+                f"<div class='summary'><b>{len(ok)}</b> completed examples · <b>{len(changed)}</b> changed · "
+                f"<b>{rounds}</b> edit rounds · <b>{events}</b> replacement events"
+                "<p class='muted'>Positions are zero-based within the gold answer. Confidence is the selected token probability in that forward pass. "
+                "Each round shows the text after all replacements from that pass were applied simultaneously.</p></div>"]
+    ordered = sorted(ok, key=lambda item: (item["unchanged"], item["index"]))
+    for record in ordered:
+        trace = record.get("edit_trace", [])
+        state = "unchanged" if record["unchanged"] else f"{record['changed_tokens']} final token changes"
+        sections.append(f"<details class='example' {'open' if trace else ''}><summary>Example {record['index']} — {state} — {len(trace)} edit rounds</summary>")
+        sections.append("<h3>Question</h3><pre>" + html.escape(record["question"]) + "</pre>")
+        sections.append("<div class='pair'><div><h3>Original gold answer</h3><pre>" +
+                        html.escape(record["original_answer"]) +
+                        "</pre></div><div><h3>Final edited answer</h3><pre>" +
+                        html.escape(record["edited_answer"]) + "</pre></div></div>")
+        if not trace:
+            sections.append("<p class='good'>No token replacement occurred.</p>")
+        for item in trace:
+            sections.append(
+                f"<div class='round'><h3>Round {item['round']} · answer block "
+                f"[{item['answer_block_start']}, {item['answer_block_end']}) · "
+                f"block step {item['block_step']}</h3>"
+            )
+            sections.append("<table><tr><th>Answer position</th><th>Old token</th><th>New token</th><th>Confidence</th></tr>")
+            for change in item["changes"]:
+                sections.append(
+                    f"<tr><td>{change['answer_position']}</td>"
+                    f"<td><code>{html.escape(repr(change['old_text']))}</code> ({change['old_id']})</td>"
+                    f"<td><code>{html.escape(repr(change['new_text']))}</code> ({change['new_id']})</td>"
+                    f"<td>{change['confidence']:.6f}</td></tr>"
+                )
+            sections.append("</table><div class='pair'><div><h4>Local context before</h4><pre>" +
+                            html.escape(item["context_before"]) +
+                            "</pre></div><div><h4>Local context after</h4><pre>" +
+                            html.escape(item["context_after"]) + "</pre></div></div>")
+            sections.append("<details><summary>Full answer after this round</summary><pre>" +
+                            html.escape(item["answer_after"]) + "</pre></details></div>")
+        sections.append("</details>")
+    sections.append("</body></html>")
+    return "\n".join(sections)
+
+
+def render_trace_report(path, records):
+    path.write_text(trace_report_html(records), encoding="utf-8")
+
+
 def main():
     args, cfg = arguments()
     examples = read_examples(cfg)
@@ -188,7 +307,8 @@ def main():
     cfg.update(backend="sglang_patched_joint_threshold", temperature=0.0,
                token_alignment="same_position", answer_processing="verbatim, fixed length",
                m2t_enabled=False, mask_token_candidate_enabled=False,
-               trace_metrics_available=False, dataset_sha256=sha256(cfg["dataset"]))
+               trace_metrics_available=True, trace_report="trace_report.html",
+               dataset_sha256=sha256(cfg["dataset"]))
     write_json(run / "effective_config.json", cfg)
     print(f"Run directory: {run}", flush=True)
     records, state = [], "initializing"
@@ -199,6 +319,10 @@ def main():
         if server_info.get("project_dllm_t2t_edit_api") != 1:
             raise RuntimeError(
                 "SGLang server lacks the project T2T editing patch; apply patches and restart it"
+            )
+        if server_info.get("project_dllm_t2t_trace_api") != 1:
+            raise RuntimeError(
+                "SGLang server lacks the project T2T trace patch; apply patches and restart it"
             )
         server_runtime = http_json(cfg["server_url"] + "/server_info", timeout=cfg["request_timeout"])
         if server_runtime.get("dllm_algorithm") != "JointThreshold":
@@ -231,13 +355,19 @@ def main():
                         edited = token_id_list(response["output_ids"])
                         metrics = compare_tokens(answer, edited)
                         decode = lambda ids: tokenizer.decode(ids, skip_special_tokens=False, clean_up_tokenization_spaces=False)
+                        raw_trace = extract_edit_trace(response.get("meta_info", {}))
+                        edit_trace, trace_replay_exact = enrich_edit_trace(
+                            raw_trace, len(prefix), answer, edited, decode
+                        )
+                        if not trace_replay_exact:
+                            raise ValueError("Replaying the server edit trace did not reproduce its output")
                         changes = [{"position": i, "old_id": answer[i], "new_id": edited[i],
                                     "old_text": decode([answer[i]]), "new_text": decode([edited[i]])}
                                    for i in metrics["changed_positions"]]
                         edited_text, original_decoded = decode(edited), decode(answer)
                         original_final = extract_gsm8k_final_answer(original_decoded)
                         edited_final = extract_gsm8k_final_answer(edited_text)
-                        record.update(metrics, status="ok", trace_metrics_available=False,
+                        record.update(metrics, status="ok", trace_metrics_available=True,
                                       edited_answer=edited_text,
                                       original_token_ids=answer, edited_token_ids=edited,
                                       fixed_prefix_token_ids=prefix, token_changes=changes,
@@ -245,7 +375,12 @@ def main():
                                       tokenizer_roundtrip_exact=original_decoded == example["original_answer"],
                                       original_final_answer=original_final, edited_final_answer=edited_final,
                                       final_answer_changed=original_final != edited_final,
-                                      server_meta_info=response.get("meta_info", {}),
+                                      server_meta_info={k: v for k, v in response.get("meta_info", {}).items()
+                                                        if k != "dllm_edit_trace"},
+                                      edit_trace=edit_trace,
+                                      trace_rounds=len(edit_trace),
+                                      trace_replacement_events=sum(len(item["changes"]) for item in edit_trace),
+                                      trace_replay_exact=trace_replay_exact,
                                       introduced_special_token_positions=[i for i in metrics["changed_positions"]
                                                                           if edited[i] in tokenizer.all_special_ids])
                 except Exception as exc:
@@ -265,13 +400,17 @@ def main():
     finally:
         summary = aggregate(records)
         summary.update(run_status=state, requested_examples=len(examples),
-                       unprocessed_examples=len(examples) - len(records), trace_metrics_available=False)
+                       unprocessed_examples=len(examples) - len(records), trace_metrics_available=True,
+                       trace_rounds=sum(record.get("trace_rounds", 0) for record in records),
+                       trace_replacement_events=sum(record.get("trace_replacement_events", 0)
+                                                    for record in records))
         write_json(run / "summary.json", summary)
         with (run / "changed_records.jsonl").open("w", encoding="utf-8") as changed_output:
             for record in records:
                 if record.get("status") == "ok" and not record["unchanged"]:
                     changed_output.write(json.dumps(record, ensure_ascii=False) + "\n")
         render_review(run / "review.html", records)
+        render_trace_report(run / "trace_report.html", records)
         print(json.dumps(summary, indent=2), flush=True)
 
 
